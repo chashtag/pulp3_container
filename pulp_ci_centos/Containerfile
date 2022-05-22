@@ -1,0 +1,108 @@
+FROM quay.io/centos/centos:stream8
+# https://ryandaniels.ca/blog/docker-dockerfile-arg-from-arg-trouble/
+ARG SCHEME="http"
+ARG ARCH="amd64"
+ARG WORKERS=6
+
+
+# https://superuser.com/questions/959380/how-do-i-install-generate-all-locales-on-fedora
+# This may not be necessary anymore because Fedora 30, unlike CentOS 7, has
+# glibc subpackages like glibc-langpack-en.
+RUN rm /etc/rpm/macros.image-language-conf && \
+    echo fastestmirror=1 >> /etc/dnf.conf && \
+    echo max_parallel_downloads=10 >> /etc/dnf.conf && \
+    echo 'LANG="en_US.UTF-8"' > /etc/locale.conf
+
+
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    PYTHONUNBUFFERED=0 \
+    DJANGO_SETTINGS_MODULE=pulpcore.app.settings \
+    PULP_SETTINGS=/etc/pulp/settings.py \
+    _BUILDAH_STARTED_IN_USERNS="" \
+    BUILDAH_ISOLATION=chroot
+
+# glibc-langpack-en is needed to provide the en_US.UTF-8 locale, which Pulp
+# seems to need.
+#
+# The last 5 lines (before clean) are needed until python3-createrepo_c gets an
+# RPM upgrade to 0.16.2. Until then, we install & build it from PyPI.
+RUN dnf -y install dnf-plugins-core && \
+    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
+    dnf config-manager --set-enabled powertools && \
+    dnf -y module disable python36 && \
+    dnf -y module enable postgresql:12 python38 nodejs:16 && \
+    dnf -y update && \
+    dnf -y install python38 python38-devel \
+    'dnf-command(builddep)' \
+    buildah --exclude container-selinux \
+    cairo-devel cmake gobject-introspection-devel cairo-gobject-devel \
+    git \
+    glibc-langpack-en \
+    libcomps-devel \
+    libcurl-devel libxml2-devel sqlite-devel file-devel \
+    libmodulemd-devel \
+    libpq-devel \
+    nginx \
+    ninja-build swig \
+    npm \
+    openssl \
+    postgresql \
+    postgresql-contrib \
+    postgresql-server \
+    python3-cryptography \
+    python3-libcomps \
+    python3-libmodulemd \
+    python3-psycopg2 \
+    python3-setuptools \
+    redis \
+    xz \
+    wget \
+    zchunk-devel \
+    ostree-libs ostree && \
+    dnf clean all
+
+
+
+COPY s6-overlay-${ARCH}.tar.xz /tmp
+
+RUN tar xf /tmp/s6-overlay-${ARCH}.tar.xz -C / --exclude="./bin" && \
+    tar xf /tmp/s6-overlay-${ARCH}.tar.xz -C /usr ./bin
+
+
+
+RUN sed 's|^#mount_program|mount_program|g' -i /etc/containers/storage.conf && \
+    mkdir -p /database \
+             /etc/nginx/pulp \
+             /etc/pulp \
+             /etc/ssl/pulp \
+             /nginx \
+             /var/lib/pgsql \
+             /var/lib/pulp/assets \
+             /var/lib/pulp/media \
+             /var/run/pulpcore-resource-manager
+
+RUN pip3 install --upgrade pip packaging
+
+RUN echo "/var/lib/pgsql true postgres 0600 0750" >> /etc/fix-attrs.d/postgres
+
+COPY assets/openssl.cnf /etc/ssl/pulp/openssl.cnf
+COPY assets/v3.cnf /etc/ssl/pulp/v3.cnf
+COPY assets/wait_on_database_migrations.sh /database/assets/wait_on_database_migrations.sh
+COPY assets/ssl_nginx.conf /nginx/ssl_nginx.conf
+COPY assets/nginx.conf /nginx/nginx.conf
+COPY assets/webserver.sh /nginx/webserver.sh
+COPY assets/services /etc/services.d
+COPY assets/init /etc/cont-init.d
+
+RUN for x in $(seq $WORKERS); do cp -r /etc/services.d/pulpcore-worker /etc/services.d/pulpcore-worker@${x}; mkdir -p /var/run/pulpcore-worker-${x};done && rm -rf /etc/services.d/pulpcore-worker
+
+RUN /nginx/webserver.sh
+
+# Install pulp-ui
+RUN git clone https://github.com/pulp/pulp-ui && cd /pulp-ui/pulp_ui/app/ && sed -i 's/"localhost"/"0.0.0.0"/g' webpack.dev.js && npm install && npm install webpack-dev-server
+
+ENTRYPOINT ["/init"]
+
+EXPOSE 80

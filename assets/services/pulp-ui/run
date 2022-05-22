@@ -1,0 +1,2 @@
+#!/usr/bin/execlineb -P
+#npm --prefix /pulp-ui/pulp_ui/app/ run start:dev
